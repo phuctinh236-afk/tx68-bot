@@ -9,7 +9,7 @@ ADMIN_USER = "@pphuc836"
 
 bot = telebot.TeleBot(TOKEN)
 
-# 2. Tạo Web Server giả lập để Render nhận diện PORT (Không bị lỗi Web Service Deploy)
+# 2. Tạo Web Server giả lập để Render nhận diện PORT (Tránh lỗi Web Service)
 app = Flask(__name__)
 
 @app.route('/')
@@ -80,5 +80,12 @@ def auto_reply(message):
 if __name__ == "__main__":
     Thread(target=run_flask).start()
     print("Bot TX68 đã sẵn sàng hoạt động!")
+    
+    # Xóa Webhook cũ để tránh lỗi Conflict Error 409
+    try:
+        bot.remove_webhook()
+    except Exception as e:
+        print(f"Xóa webhook lỗi (có thể bỏ qua): {e}")
+        
     bot.infinity_polling()
-  
+    
