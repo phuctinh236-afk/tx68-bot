@@ -10,6 +10,19 @@ ADMIN_USER = "@pphuc8386"
 
 bot = telebot.TeleBot(TOKEN)
 
+# Bộ nhớ lưu ID tin nhắn cũ để xóa tự động: {chat_id: [msg_id1, msg_id2]}
+user_last_messages = {}
+
+def delete_old_messages(chat_id):
+    """Xóa sạch câu hỏi và câu trả lời cũ của người dùng"""
+    if chat_id in user_last_messages:
+        for msg_id in user_last_messages[chat_id]:
+            try:
+                bot.delete_message(chat_id, msg_id)
+            except Exception:
+                pass # Bỏ qua nếu tin nhắn đã bị xóa từ trước
+        user_last_messages[chat_id] = []
+
 # 2. Tạo Web Server giả lập cho Render
 app = Flask(__name__)
 
@@ -21,7 +34,7 @@ def run_flask():
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
 
-# 3. KHO DỮ LIỆU BỘ NÃO AI (Bao phủ mọi tính năng trong App)
+# 3. KHO DỮ LIỆU BỘ NÃO AI CSKH
 KNOWLEDGE_BASE = {
     "dang_ky": {
         "keywords": ["đăng ký", "dang ky", "tạo tài khoản", "tao tk", "dk sao", "đăng kí", "lập nick", "lap nick", "tạo nick"],
@@ -87,7 +100,7 @@ KNOWLEDGE_BASE = {
     }
 }
 
-# 4. MENU NÚT BẤM THÔNG MINH (Inline Keyboard)
+# 4. MENU NÚT BẤM THÔNG MINH
 def get_main_keyboard():
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -102,26 +115,36 @@ def get_main_keyboard():
     )
     return markup
 
-# 5. XỬ LÝ TIN NHẮN
+# 5. XỬ LÝ TIN NHẮN GÕ CHỮ
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
+    chat_id = message.chat.id
+    delete_old_messages(chat_id) # Xóa tin nhắn cũ trước đó
+    
     welcome_text = (
         f"🔥 **CHÀO MỪNG ĐẾN VỚI TX68 CSKH!** 🔥\n\n"
         f"Em là Trợ lý AI tự động. Bạn hãy **bấm trực tiếp vào các nút lựa chọn bên dưới** hoặc **gõ câu hỏi** để em hỗ trợ ngay lập tức nhé!\n\n"
         f"👤 **Admin hỗ trợ chính thức:** {ADMIN_USER}"
     )
-    bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    sent_msg = bot.send_message(chat_id, welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    
+    # Lưu lại ID câu hỏi người dùng và câu trả lời của bot
+    user_last_messages[chat_id] = [message.message_id, sent_msg.message_id]
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
-    text = message.text.lower()
+    chat_id = message.chat.id
+    delete_old_messages(chat_id) # Xóa ngay cặp câu hỏi + câu trả lời cũ
     
-    # Quét từ khóa tự động
+    text = message.text.lower()
     matched = False
+    
     for topic, data in KNOWLEDGE_BASE.items():
         if any(kw in text for kw in data["keywords"]):
             reply_msg = data["reply"].format(admin=ADMIN_USER)
-            bot.reply_to(message, reply_msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
+            sent_msg = bot.send_message(chat_id, reply_msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
+            # Lưu lại ID tin nhắn mới
+            user_last_messages[chat_id] = [message.message_id, sent_msg.message_id]
             matched = True
             break
             
@@ -130,15 +153,26 @@ def handle_text(message):
             f"🤖 Em chưa hiểu rõ ý câu hỏi lắm!\n\n"
             f"Anh/chị chọn nhanh ở menu nút bấm bên dưới hoặc nhắn trực tiếp Admin **{ADMIN_USER}** để được hỗ trợ nhé!"
         )
-        bot.reply_to(message, fail_msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        sent_msg = bot.send_message(chat_id, fail_msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        user_last_messages[chat_id] = [message.message_id, sent_msg.message_id]
 
 # 6. XỬ LÝ KHI BẤM NÚT MENU
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
+    chat_id = call.message.chat.id
+    delete_old_messages(chat_id) # Xóa các tin nhắn trước
+    
+    # Xóa luôn cái menu nút bấm cũ
+    try:
+        bot.delete_message(chat_id, call.message.message_id)
+    except Exception:
+        pass
+
     topic = call.data
     if topic in KNOWLEDGE_BASE:
         reply_msg = KNOWLEDGE_BASE[topic]["reply"].format(admin=ADMIN_USER)
-        bot.send_message(call.message.chat.id, reply_msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        sent_msg = bot.send_message(chat_id, reply_msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        user_last_messages[chat_id] = [sent_msg.message_id]
         bot.answer_callback_query(call.id)
 
 # 7. KHỞI CHẠY BOT
@@ -150,3 +184,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Xóa webhook lỗi: {e}")
     bot.infinity_polling()
+        
