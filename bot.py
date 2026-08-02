@@ -1,187 +1,175 @@
 import os
+import re
+import random
 from threading import Thread
-from flask import Flask
+from flask import Flask, request, jsonify
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# 1. Khởi tạo Token Bot & Telegram Admin
-TOKEN = os.getenv("BOT_TOKEN", "ĐIỀN_TOKEN_BOT_CỦA_BẠN_VÀO_ĐÂY")
-ADMIN_USER = "@pphuc8386"
+# ==================== 1. KHỞI TẠO 2 BOT & ID NHÓM CSKH ====================
+TOKEN_AI = "8871256449:AAGaIlrsMouC2zT-aAmykabNltYSb-2WXCM"       # Bot 1: Chuyên trả lời AI
+TOKEN_STAFF = "8576597700:AAG6p0YhWf1-QXMwR1vNtHxx6r7eAFxvRFU"    # Bot 2: Chuyên chuyển tiếp & dán tin nhắn
+STAFF_GROUP_ID = "-1004444253619"                                 # ID Nhóm Telegram CSKH của bạn
 
-bot = telebot.TeleBot(TOKEN)
+bot_ai = telebot.TeleBot(TOKEN_AI)
+bot_staff = telebot.TeleBot(TOKEN_STAFF)
 
-# Bộ nhớ lưu ID tin nhắn cũ để xóa tự động: {chat_id: [msg_id1, msg_id2]}
-user_last_messages = {}
+# ==================== 2. QUẢN LÝ MÃ SỐ KHÁCH HÀNG (CỐ ĐỊNH) ====================
+# Lưu trữ bộ nhớ: ID Game/Web <-> Mã 6 chữ số
+user_to_code = {}
+code_to_user = {}
 
-def delete_old_messages(chat_id):
-    """Xóa sạch câu hỏi và câu trả lời cũ của người dùng"""
-    if chat_id in user_last_messages:
-        for msg_id in user_last_messages[chat_id]:
-            try:
-                bot.delete_message(chat_id, msg_id)
-            except Exception:
-                pass # Bỏ qua nếu tin nhắn đã bị xóa từ trước
-        user_last_messages[chat_id] = []
+# Hộp thư chờ để Bot 2 dán tin nhắn về cho khách ở Game/CSKH
+outbound_messages = {} # { "011200": ["Câu trả lời 1", "Câu trả lời 2"] }
 
-# 2. Tạo Web Server giả lập cho Render
+def get_or_assign_code(user_id):
+    """Cấp mã 6 chữ số cố định vĩnh viễn cho từng khách"""
+    user_id_str = str(user_id)
+    if user_id_str not in user_to_code:
+        while True:
+            new_code = f"{random.randint(100000, 999999)}"
+            if new_code not in code_to_user:
+                break
+        user_to_code[user_id_str] = new_code
+        code_to_user[new_code] = user_id_str
+    return user_to_code[user_id_str]
+
+# ==================== 3. KHO BỘ NÃO AI (BOT 1) ====================
+KNOWLEDGE_BASE = {
+    "nap_tien": {
+        "keywords": ["nạp", "nap tien", "momo", "zalopay", "usdt", "hn-pay1", "o-pay", "d-pay", "thẻ cào"],
+        "reply": "💳 **HƯỚNG DẪN NẠP TIỀN:** Tỷ lệ quy đổi 1=1K. Bạn vào mục Nạp Tiền chọn cổng HN-Pay1, O-Pay, Momo hoặc USDT. Chuyển đúng nội dung hiển thị trên màn hình nhé!"
+    },
+    "rut_tien": {
+        "keywords": ["rút", "rut tien", "kẹt tiền", "chưa về"],
+        "reply": "🏧 **HƯỚNG DẪN RÚT TIỀN:** Vào mục Tài Khoản -> Rút Tiền, liên kết ngân hàng chính chủ và tạo lệnh. Tiền sẽ về trong 1-3 phút!"
+    },
+    "dang_ky": {
+        "keywords": ["đăng ký", "dang ky", "tạo tk", "lập nick"],
+        "reply": "🎮 **ĐĂNG KÝ TÀI KHOẢN:** Chọn nút Đăng Ký ở màn hình chính, tạo Tên & Mật khẩu. Báo Mã ID cho Admin để nhận Code Tân Thủ!"
+    },
+    "khuyen_mai": {
+        "keywords": ["khuyến mãi", "khuyen mai", "code", "thưởng"],
+        "reply": "🎁 **SỰ KIỆN HOT:** Thưởng nạp đầu 100%, Hoàn trả 1.5% mỗi ngày. Đăng nhập mỗi ngày nhận lì xì VIP!"
+    }
+}
+
+def get_ai_answer(question):
+    """Bot 1 dò từ khóa để đưa ra câu trả lời thích hợp"""
+    q_lower = question.lower()
+    for topic, data in KNOWLEDGE_BASE.items():
+        if any(kw in q_lower for kw in data["keywords"]):
+            return data["reply"]
+    return "🤖 Em đã tiếp nhận câu hỏi. Nhân viên CSKH sẽ hỗ trợ trực tiếp cho anh/chị ngay ạ!"
+
+# ==================== 4. WEB SERVER (KẾT NỐI VỚI GAME CSKH) ====================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "TX68 Bot CSKH AI đang hoạt động 24/7!"
+    return "Hệ thống 2 Bot CSKH TX68 đang vận hành!"
 
+# API 1: Nơi Game gửi tin nhắn của Khách lên cho Bot 2
+@app.route('/api/send_from_game', methods=['POST'])
+def send_from_game():
+    data = request.json or {}
+    user_id = data.get("user_id", "guest_123")
+    user_msg = data.get("message", "")
+
+    if not user_msg:
+        return jsonify({"status": "error", "message": "Nội dung trống!"})
+
+    # BƯỚC 1: Bot 2 cấp Mã 6 chữ số cố định cho khách
+    customer_code = get_or_assign_code(user_id)
+
+    # BƯỚC 2: Bot 2 bắn tin nhắn kèm Mã lên Nhóm CSKH Telegram
+    telegram_text = f"📌 Mã KH: {customer_code}\n💬 Khách hỏi: {user_msg}"
+    try:
+        bot_staff.send_message(STAFF_GROUP_ID, telegram_text)
+    except Exception as e:
+        print(f"Lỗi Bot 2 gửi lên nhóm: {e}")
+
+    return jsonify({
+        "status": "success", 
+        "customer_code": customer_code,
+        "message": "Tin nhắn đã gửi sang hệ thống CSKH"
+    })
+
+# API 2: Nơi Game liên tục gọi xuống để lấy câu trả lời của Bot 1 / Staff
+@app.route('/api/get_reply_for_game', methods=['GET'])
+def get_reply_for_game():
+    user_id = request.args.get("user_id", "")
+    if not user_id or str(user_id) not in user_to_code:
+        return jsonify({"replies": []})
+
+    code = user_to_code[str(user_id)]
+    messages = outbound_messages.get(code, [])
+    
+    # Lấy xong thì xóa tin nhắn trong bộ nhớ chờ
+    outbound_messages[code] = []
+    return jsonify({"customer_code": code, "replies": messages})
+
+# ==================== 5. BẰNG CHUYỀN LẮNG NGHE Ở NHÓM TELEGRAM ====================
+
+# BOT 1: Lắng nghe tin do Bot 2 bắn lên -> Dò Mã -> Tìm câu trả lời -> Bắn lại nhóm
+@bot_ai.message_handler(func=lambda msg: True)
+def bot_ai_process(message):
+    if str(message.chat.id) != str(STAFF_GROUP_ID):
+        return
+
+    text = message.text or ""
+    
+    # BƯỚC 3: Bot 1 trích xuất Mã 6 chữ số từ tin nhắn Bot 2 vừa gửi
+    match = re.search(r"Mã KH:\s*(\d{6})", text)
+    if match and "Khách hỏi:" in text:
+        code = match.group(1)
+        question = text.split("Khách hỏi:")[1].strip()
+
+        # Bot 1 tìm câu trả lời AI
+        ai_reply = get_ai_answer(question)
+
+        # Bot 1 phát tin trả lời kèm Mã số lại vào nhóm
+        response_text = f"📌 Mã KH: {code}\n🤖 AI Trả Lời: {ai_reply}"
+        bot_ai.send_message(STAFF_GROUP_ID, response_text)
+
+# BOT 2: Lắng nghe tin nhắn trả lời từ Bot 1 (hoặc Nhân viên) trong nhóm -> Dò Mã -> Dán về Game
+@bot_staff.message_handler(func=lambda msg: True)
+def bot_staff_process(message):
+    if str(message.chat.id) != str(STAFF_GROUP_ID):
+        return
+
+    text = message.text or ""
+    
+    # BƯỚC 4: Bot 2 chỉ dò Mã 6 chữ số trong câu trả lời
+    match = re.search(r"Mã KH:\s*(\d{6})", text)
+    if match and ("AI Trả Lời:" in text or "Trả lời:" in text or not message.from_user.is_bot):
+        code = match.group(1)
+        
+        # Tách lấy nội dung câu trả lời sau phần Mã số
+        lines = text.split("\n", 1)
+        reply_content = lines[1] if len(lines) > 1 else lines[0]
+        reply_content = reply_content.replace("🤖 AI Trả Lời:", "").strip()
+
+        # Bot 2 dán câu trả lời vào bộ nhớ để chuyển xuống CSKH bên Game cho Mã số đó
+        if code not in outbound_messages:
+            outbound_messages[code] = []
+        outbound_messages[code].append(reply_content)
+
+# ==================== 6. CHẠY SONG SONG CẢ 2 BOT & WEB SERVER ====================
 def run_flask():
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
 
-# 3. KHO DỮ LIỆU BỘ NÃO AI CSKH
-KNOWLEDGE_BASE = {
-    "dang_ky": {
-        "keywords": ["đăng ký", "dang ky", "tạo tài khoản", "tao tk", "dk sao", "đăng kí", "lập nick", "lap nick", "tạo nick"],
-        "reply": "🎮 **HƯỚNG DẪN ĐĂNG KÝ TÀI KHOẢN TX68:**\n\n"
-                 "1️⃣ Truy cập vào cổng game TX68.\n"
-                 "2️⃣ Chọn **Đăng Ký** ở góc trên màn hình.\n"
-                 "3️⃣ Điền Tên đăng nhập & Mật khẩu cá nhân.\n"
-                 "4️⃣ Sau khi vào game, bấm mục **Tài khoản** xem Mã ID (Ví dụ: `8386888`).\n\n"
-                 "👉 Báo ID cho Admin {admin} để nhận ngay **Code 50K Tân Thủ**!"
-    },
-    "nap_tien": {
-        "keywords": ["nạp", "nap tien", "nạp sao", "chuyển tiền", "momo", "zalopay", "viettelpay", "usdt", "thẻ cào", "hn-pay1", "o-pay", "d-pay", "quy đổi", "điểm"],
-        "reply": "💳 **HƯỚNG DẪN NẠP TIỀN TOÀN TẬP:**\n\n"
-                 "📌 **Tỷ lệ quy đổi chuẩn:** `1 Điểm = 1.000 VNĐ` (Nạp 100K nhập `100`).\n\n"
-                 "🔹 **Phương thức nạp:**\n"
-                 "• Ngân Hàng (Cổng HN-Pay1, O-Pay, D-Pay)\n"
-                 "• Ví điện tử: MOMOPAY, ZaloPay, ViettelPay\n"
-                 "• Tiền điện tử: USDT (An toàn & Bảo mật)\n"
-                 "• Thẻ cào điện thoại đủ mệnh giá\n\n"
-                 "⚠️ *Lưu ý:* Cần chuyển đúng **Nội dung chuyển tiền** hiển thị trên màn hình để hệ thống cộng điểm tự động sau 30 giây!"
-    },
-    "rut_tien": {
-        "keywords": ["rút", "rut tien", "rút sao", "rut bao lau", "rút tiền lâu", "không rút được", "kẹt tiền", "rút ngân hàng", "rút chưa về"],
-        "reply": "🏧 **HƯỚNG DẪN RÚT TIỀN SIÊU TỐC:**\n\n"
-                 "1️⃣ Vào mục **Tài Khoản** -> Chọn **Rút Tiền**.\n"
-                 "2️⃣ Liên kết ngân hàng chính chủ & Nhập số tiền cần rút.\n"
-                 "3️⃣ Xác nhận giao dịch (Tự động duyệt 1 - 3 phút).\n\n"
-                 "👉 Sau 5 phút chưa nhận được tiền, nhắn ngay Admin {admin} kèm ID tài khoản để xử lý gấp!"
-    },
-    "khuyen_mai": {
-        "keywords": ["khuyến mãi", "khuyen mai", "thưởng", "thuong nap", "nạp lần đầu", "hoàn trả", "điểm danh", "code", "quà", "lì xì"],
-        "reply": "🎁 **SỰ KIỆN KHUYẾN MÃI HOT NHẤT TX68:**\n\n"
-                 "🔥 **Thưởng Nạp Lần Đầu 100%:** Dành cho thành viên mới nạp lần đầu.\n"
-                 "⭐ **Hoàn Trả Mỗi Ngày 1.5%:** Không giới hạn tiền cược cho tất cả sảnh game.\n"
-                 "💎 **Báo Danh Nhận Quà VIP:** Đăng nhập mỗi ngày nhận lì xì ngẫu nhiên.\n\n"
-                 "📩 Nhắn Admin {admin} đọc ID để kích hoạt KM nạp đầu!"
-    },
-    "vip_system": {
-        "keywords": ["vip", "cấp vip", "nâng vip", "thăng hạng", "lì xì vip", "quà sinh nhật", "đặc quyền vip", "tiến trình vip", "vip 1", "vip 2"],
-        "reply": "👑 **ĐẶC QUYỀN TRUNG TÂM VIP:**\n\n"
-                 "📈 **Tiến trình thăng hạng:** Tự động tích lũy điểm cược (VD: VIP 1 lên VIP 2 cần `1.000.000đ` điểm cược).\n\n"
-                 "🎁 **Quyền lợi Hội viên VIP:**\n"
-                 "• 🧧 **Lì Xì Thăng Hạng:** Nhận thưởng nóng ngay khi lên cấp mới.\n"
-                 "• 💸 **Hoàn Trả Cao Hơn:** Tỷ lệ hoàn trả cược theo ngày cực cao.\n"
-                 "• 🎂 **Quà Sinh Nhật:** Tri ân quà tặng đặc biệt trong tháng sinh nhật.\n"
-                 "• ⚡ **Ưu Tiên Rút Tiền:** Duyệt rút tiền hạn mức lớn, ưu tiên tốc độ cao."
-    },
-    "game_hot": {
-        "keywords": ["game hay", "giờ nhả", "nổ hũ", "slots", "bắn cá", "đá gà", "casino", "game bài", "tài xỉu", "xổ số", "crash", "arcade", "khung giờ", "mẹo thắng"],
-        "reply": "🎯 **DANH MỤC GAME & KHUNG GIỜ VÀNG TX68:**\n\n"
-                 "🎮 **Sảnh HOT:** Slots Nổ Hũ (Super Ace, Fortune Gems, Dragon Gems), Bắn Cá 3D, Đá Gà, Live Casino, Game Bài, Crash, Arcade.\n\n"
-                 "⏰ **Khung giờ Vàng nổ hũ / nhả phế:**\n"
-                 "  - Trưa: **11h30 - 13h00**\n"
-                 "  - Tối: **20h00 - 23h30**\n\n"
-                 "💡 *Kinh nghiệm:* Căn đúng khung giờ vàng vào vốn để tỷ lệ nổ hũ cao nhất!"
-    },
-    "su_co": {
-        "keywords": ["lỗi", "quên mật khẩu", "quen mk", "mất nick", "lịch sử giao dịch", "đổi thông tin", "bị khóa", "không vào được", "cskh"],
-        "reply": "🛠 **HỖ TRỢ XỬ LÝ LỖI & TÀI KHOẢN:**\n\n"
-                 "• **Quên MK / Khóa nick:** Cung cấp ID tài khoản cho Admin.\n"
-                 "• **Xem lịch sử:** Vào *Tài Khoản* -> *Lịch Sử Giao Dịch* để tra cứu lệnh nạp/rút.\n"
-                 "👉 Liên hệ Admin {admin} để được xử lý trực tiếp 1:1 trong 3 phút!"
-    }
-}
+def run_bot_ai():
+    bot_ai.remove_webhook()
+    bot_ai.infinity_polling()
 
-# 4. MENU NÚT BẤM THÔNG MINH
-def get_main_keyboard():
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("🎮 Đăng Ký Tài Khoản", callback_data="dang_ky"),
-        InlineKeyboardButton("💳 Hướng Dẫn Nạp Tiền", callback_data="nap_tien"),
-        InlineKeyboardButton("🏧 Hướng Dẫn Rút Tiền", callback_data="rut_tien"),
-        InlineKeyboardButton("🎁 Sự Kiện Khuyến Mãi", callback_data="khuyen_mai"),
-        InlineKeyboardButton("👑 Đặc Quyền VIP", callback_data="vip_system"),
-        InlineKeyboardButton("🔥 Game Hot & Giờ Vàng", callback_data="game_hot"),
-        InlineKeyboardButton("🛠 Sự Cố & Lỗi Giao Dịch", callback_data="su_co"),
-        InlineKeyboardButton("💬 Chat 1:1 Với Admin", url="https://t.me/pphuc8386")
-    )
-    return markup
+def run_bot_staff():
+    bot_staff.remove_webhook()
+    bot_staff.infinity_polling()
 
-# 5. XỬ LÝ TIN NHẮN GÕ CHỮ
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    chat_id = message.chat.id
-    delete_old_messages(chat_id) # Xóa tin nhắn cũ trước đó
-    
-    welcome_text = (
-        f"🔥 **CHÀO MỪNG ĐẾN VỚI TX68 CSKH!** 🔥\n\n"
-        f"Em là Trợ lý AI tự động. Bạn hãy **bấm trực tiếp vào các nút lựa chọn bên dưới** hoặc **gõ câu hỏi** để em hỗ trợ ngay lập tức nhé!\n\n"
-        f"👤 **Admin hỗ trợ chính thức:** {ADMIN_USER}"
-    )
-    sent_msg = bot.send_message(chat_id, welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
-    
-    # Lưu lại ID câu hỏi người dùng và câu trả lời của bot
-    user_last_messages[chat_id] = [message.message_id, sent_msg.message_id]
-
-@bot.message_handler(func=lambda message: True)
-def handle_text(message):
-    chat_id = message.chat.id
-    delete_old_messages(chat_id) # Xóa ngay cặp câu hỏi + câu trả lời cũ
-    
-    text = message.text.lower()
-    matched = False
-    
-    for topic, data in KNOWLEDGE_BASE.items():
-        if any(kw in text for kw in data["keywords"]):
-            reply_msg = data["reply"].format(admin=ADMIN_USER)
-            sent_msg = bot.send_message(chat_id, reply_msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
-            # Lưu lại ID tin nhắn mới
-            user_last_messages[chat_id] = [message.message_id, sent_msg.message_id]
-            matched = True
-            break
-            
-    if not matched:
-        fail_msg = (
-            f"🤖 Em chưa hiểu rõ ý câu hỏi lắm!\n\n"
-            f"Anh/chị chọn nhanh ở menu nút bấm bên dưới hoặc nhắn trực tiếp Admin **{ADMIN_USER}** để được hỗ trợ nhé!"
-        )
-        sent_msg = bot.send_message(chat_id, fail_msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
-        user_last_messages[chat_id] = [message.message_id, sent_msg.message_id]
-
-# 6. XỬ LÝ KHI BẤM NÚT MENU
-@bot.callback_query_handler(func=lambda call: True)
-def handle_query(call):
-    chat_id = call.message.chat.id
-    delete_old_messages(chat_id) # Xóa các tin nhắn trước
-    
-    # Xóa luôn cái menu nút bấm cũ
-    try:
-        bot.delete_message(chat_id, call.message.message_id)
-    except Exception:
-        pass
-
-    topic = call.data
-    if topic in KNOWLEDGE_BASE:
-        reply_msg = KNOWLEDGE_BASE[topic]["reply"].format(admin=ADMIN_USER)
-        sent_msg = bot.send_message(chat_id, reply_msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
-        user_last_messages[chat_id] = [sent_msg.message_id]
-        bot.answer_callback_query(call.id)
-
-# 7. KHỞI CHẠY BOT
 if __name__ == "__main__":
     Thread(target=run_flask).start()
-    print("Bot AI TX68 đã sẵn sàng!")
-    try:
-        bot.remove_webhook()
-    except Exception as e:
-        print(f"Xóa webhook lỗi: {e}")
-    bot.infinity_polling()
-        
+    Thread(target=run_bot_ai).start()
+    Thread(target=run_bot_staff).start()
+    print("🚀 Hệ thống 2 Bot TX68 đã sẵn sàng hoạt động!")
+    
