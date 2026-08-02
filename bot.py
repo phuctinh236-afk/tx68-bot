@@ -2,14 +2,15 @@ import os
 from threading import Thread
 from flask import Flask
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# 1. Khởi tạo Token Bot từ môi trường (hoặc điền trực tiếp Token vào đây)
+# 1. Khởi tạo Token Bot & Telegram Admin chính thức
 TOKEN = os.getenv("BOT_TOKEN", "ĐIỀN_TOKEN_BOT_CỦA_BẠN_VÀO_ĐÂY")
-ADMIN_USER = "@pphuc836"
+ADMIN_USER = "@pphuc8386"
 
 bot = telebot.TeleBot(TOKEN)
 
-# 2. Tạo Web Server giả lập để Render nhận diện PORT (Tránh lỗi Web Service)
+# 2. Tạo Web Server giả lập cho Render
 app = Flask(__name__)
 
 @app.route('/')
@@ -20,7 +21,7 @@ def run_flask():
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
 
-# 3. Kho dữ liệu câu trả lời thông minh
+# 3. Kho dữ liệu câu trả lời
 KNOWLEDGE_BASE = {
     "dang_ky": {
         "keywords": ["đăng ký", "dang ky", "tạo tài khoản", "tao tk", "dk sao", "đăng kí", "lập nick", "lap nick"],
@@ -40,7 +41,19 @@ KNOWLEDGE_BASE = {
     }
 }
 
-# 4. Bộ xử lý tin nhắn
+# Tạo bảng Nút Bấm Tự Động (Inline Keyboard)
+def create_main_keyboard():
+    markup = InlineKeyboardMarkup()
+    markup.row_width = 1
+    markup.add(
+        InlineKeyboardButton("🎮 Đăng ký tài khoản thế nào?", callback_data="dang_ky"),
+        InlineKeyboardButton("💳 Cách nạp / rút tiền?", callback_data="nap_rut"),
+        InlineKeyboardButton("🔥 Game nào hay / Khung giờ nổ hũ?", callback_data="gio_vang"),
+        InlineKeyboardButton("👑 Quyền lợi nâng VIP?", callback_data="vip")
+    )
+    return markup
+
+# 4. Bộ xử lý tin nhắn gõ chữ
 @bot.message_handler(func=lambda message: True)
 def auto_reply(message):
     text = message.text.lower()
@@ -49,43 +62,46 @@ def auto_reply(message):
     if text in ['/start', 'hi', 'hello', 'chào', 'chao', 'bot']:
         welcome_text = (
             f"🔥 **Chào mừng bạn đến với TX68 CSKH!** 🔥\n\n"
-            f"Em là AI hỗ trợ tự động. Bạn cần hỏi gì cứ gõ trực tiếp nhé:\n"
-            f"• *Đăng ký tài khoản thế nào?*\n"
-            f"• *Cách nạp / rút tiền?*\n"
-            f"• *Game nào hay / Khung giờ nổ hũ?*\n"
-            f"• *Quyền lợi nâng VIP?*\n\n"
+            f"Em là AI hỗ trợ tự động. Bạn hãy **chạm trực tiếp vào các nút lựa chọn bên dưới** để xem nhanh câu trả lời nhé:\n\n"
             f"💬 Hỗ trợ trực tiếp 1:1 bởi Admin: {ADMIN_USER}"
         )
-        bot.reply_to(message, welcome_text, parse_mode="Markdown")
+        bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=create_main_keyboard())
         return
 
-    # Quét từ khóa thông minh
+    # Quét từ khóa khi người dùng tự nhập chữ
     matched = False
     for topic, data in KNOWLEDGE_BASE.items():
         if any(kw in text for kw in data["keywords"]):
             response_text = data["reply"].format(admin=ADMIN_USER)
-            bot.reply_to(message, response_text, parse_mode="Markdown")
+            bot.reply_to(message, response_text, parse_mode="Markdown", reply_markup=create_main_keyboard())
             matched = True
             break
             
-    # Trường hợp không nhận diện được câu hỏi
     if not matched:
         bot.reply_to(
             message, 
-            f"🤖 Em chưa hiểu rõ ý anh lắm! Anh có thể nhắn trực tiếp cho Admin {ADMIN_USER} để được giải đáp 1:1 ngay lập tức nhé!", 
-            parse_mode="Markdown"
+            f"🤖 Em chưa hiểu rõ ý anh lắm! Anh có thể chọn các nút chức năng bên dưới hoặc nhắn trực tiếp Admin {ADMIN_USER} nhé!", 
+            parse_mode="Markdown",
+            reply_markup=create_main_keyboard()
         )
 
-# 5. Chạy Bot và Web Server song song
+# 5. Bộ xử lý sự kiện khi người dùng BẤM VÀO NÚT
+@bot.callback_query_handler(func=lambda call: True)
+def callback_listener(call):
+    topic = call.data
+    if topic in KNOWLEDGE_BASE:
+        response_text = KNOWLEDGE_BASE[topic]["reply"].format(admin=ADMIN_USER)
+        # Gửi tin nhắn phản hồi kèm theo Menu nút bấm tiếp theo
+        bot.send_message(call.message.chat.id, response_text, parse_mode="Markdown", reply_markup=create_main_keyboard())
+        # Đóng trạng thái loading của nút
+        bot.answer_callback_query(call.id)
+
+# 6. Khởi chạy Bot
 if __name__ == "__main__":
     Thread(target=run_flask).start()
     print("Bot TX68 đã sẵn sàng hoạt động!")
-    
-    # Xóa Webhook cũ để tránh lỗi Conflict Error 409
     try:
         bot.remove_webhook()
     except Exception as e:
-        print(f"Xóa webhook lỗi (có thể bỏ qua): {e}")
-        
+        print(f"Xóa webhook lỗi: {e}")
     bot.infinity_polling()
-    
